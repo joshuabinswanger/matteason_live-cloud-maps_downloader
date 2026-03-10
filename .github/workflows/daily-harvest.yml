@@ -2,7 +2,10 @@ name: 8K Cloud Map Harvester
 
 on:
   schedule:
-    - cron: "0 */3 * * *"
+    # Runs at :30 of the final hour of each 3-hour window (UTC).
+    # This ensures source images are fully published before archiving.
+    # The rounded timestamp snaps back to the window start (0000, 0300, ...).
+    - cron: "30 2,5,8,11,14,17,20,23 * * *"
   workflow_dispatch: # Allows manual trigger for testing
 
 jobs:
@@ -14,20 +17,25 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Compute rounded timestamp
+        id: timestamp
+        run: |
+          HOUR=$(( 10#$(date +'%H') ))
+          ROUNDED_HOUR=$(( (HOUR / 3) * 3 ))
+          TIMESTAMP="$(date +'%Y%m%d')_$(printf '%02d00' $ROUNDED_HOUR)"
+          echo "value=$TIMESTAMP" >> $GITHUB_OUTPUT
+          echo "ROUNDED_TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install -r requirements.txt
 
       - name: Run 8K Downloader
         run: python live-cloud-maps-downloader.py
-
-      - name: Get timestamp
-        id: timestamp
-        run: echo "value=$(date +'%Y%m%d_%H%M')" >> $GITHUB_OUTPUT
 
       - name: Publish Release
         uses: softprops/action-gh-release@v2

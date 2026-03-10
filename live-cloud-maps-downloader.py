@@ -13,25 +13,36 @@ MAPS = {
 
 BASE_FOLDER = "downloads"
 
+def get_timestamp():
+    # In CI the workflow pre-computes a rounded timestamp and injects it as an
+    # env var so that filenames and the release tag are guaranteed to match.
+    # When running locally we compute it here using the same rounding logic.
+    env_ts = os.environ.get("ROUNDED_TIMESTAMP")
+    if env_ts:
+        return env_ts
+    now = datetime.now()
+    rounded_hour = (now.hour // 3) * 3
+    return now.strftime("%Y%m%d") + f"_{rounded_hour:02d}00"
+
 def download_maps():
     # Use a consistent timestamp for all maps in this run
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    timestamp = get_timestamp()
     print(f"--- Starting Download Run: {timestamp} ---")
-    
+
     for map_name, url in MAPS.items():
         # Create a dedicated folder for EACH map type (Great for 3D Image Sequences)
         map_folder = os.path.join(BASE_FOLDER, map_name)
         os.makedirs(map_folder, exist_ok=True)
-        
+
         # Determine file extension and create the path
         ext = "png" if url.endswith(".png") else "jpg"
         filename = f"{map_name}_{timestamp}.{ext}"
         filepath = os.path.join(map_folder, filename)
-        
+
         try:
             print(f"Downloading {map_name}...")
             response = requests.get(url, timeout=120, stream=True)
-            
+
             if response.status_code == 200:
                 with open(filepath, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
