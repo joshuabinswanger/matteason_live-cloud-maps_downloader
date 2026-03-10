@@ -1,0 +1,33 @@
+name: 8K Cloud Map Harvester
+
+on:
+  schedule:
+    - cron: "0 */3 * * *"
+  workflow_dispatch: # Allows manual trigger for testing
+
+jobs:
+  harvest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run 8K Downloader
+        run: python live-cloud-maps-downloader.py
+
+      - name: Upload Maps as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: earth-maps-${{ github.run_id }}
+          path: downloads/
+          # Keep at 1 day to avoid hitting GitHub's 500MB private storage limit
+          retention-days: 14
+          compression-level: 0 # Disable compression to speed up the process (JPG/PNG are already compressed)
