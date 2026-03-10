@@ -41,5 +41,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: maps-${{ steps.timestamp.outputs.value }}
-          name: Earth Maps ${{ steps.timestamp.outputs.value }}
+          name: EarthCloudMaps_${{ steps.timestamp.outputs.value }}
           files: downloads/**/*
