@@ -5,7 +5,7 @@ on:
     # Runs at :30 of the final hour of each 3-hour window (UTC).
     # This ensures source images are fully published before archiving.
     # The rounded timestamp snaps back to the window start (0000, 0300, ...).
-    - cron: "30 2,5,8,11,14,17,20,23 * * *"
+    - cron: "11 2,5,8,11,14,17,20,23 * * *"
   workflow_dispatch: # Allows manual trigger for testing
 
 jobs:
