@@ -33,6 +33,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -41,10 +42,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ENCODER = os.path.join(HERE, "encode_archive.py")
 
 
-def gh(args, capture=True):
-    return subprocess.run(["gh", *args], check=True, text=True,
-                          capture_output=capture).stdout if capture else \
-           subprocess.run(["gh", *args], check=True)
+def run_gh(args, retries=5):
+    """Run a gh command with retries -- the GitHub API/CLI flakes intermittently
+    (transient 401s, rate hiccups) and a single failure shouldn't abort a long
+    batch. Returns stdout on success; raises after exhausting retries."""
+    for attempt in range(1, retries + 1):
+        r = subprocess.run(["gh", *args], text=True, capture_output=True)
+        if r.returncode == 0:
+            return r.stdout
+        sys.stderr.write(f"[gh retry {attempt}/{retries}] {' '.join(args[:3])} "
+                         f"rc={r.returncode}: {r.stderr.strip()[:200]}\n")
+        sys.stderr.flush()
+        time.sleep(3 * attempt)
+    raise RuntimeError(f"gh failed after {retries} attempts: {' '.join(args)}")
 
 
 def week_of_tag(tag):
@@ -61,8 +71,8 @@ def week_of_tag(tag):
 
 
 def list_releases():
-    out = gh(["release", "list", "--repo", REPO, "--limit", "5000",
-              "--json", "tagName,isDraft"])
+    out = run_gh(["release", "list", "--repo", REPO, "--limit", "5000",
+                  "--json", "tagName,isDraft"])
     return json.loads(out)
 
 
@@ -130,8 +140,8 @@ def main():
             print(f"\n[{wk}] already archived -- deleting "
                   f"{len(by_week[wk])} redundant raw releases")
             for tag in by_week[wk]:
-                subprocess.run(["gh", "release", "delete", tag, "--repo", REPO,
-                                "--yes", "--cleanup-tag"], check=True)
+                run_gh(["release", "delete", tag, "--repo", REPO,
+                        "--yes", "--cleanup-tag"])
 
     os.makedirs(args.archive_dir, exist_ok=True)
     for wk in todo:
@@ -142,8 +152,8 @@ def main():
         print(f"\n=== {wk}: {len(tags)} runs ===")
 
         for tag in tags:
-            subprocess.run(["gh", "release", "download", tag, "--repo", REPO,
-                            "--dir", staging, "--pattern", "*"], check=True)
+            run_gh(["release", "download", tag, "--repo", REPO,
+                    "--dir", staging, "--pattern", "*"])
 
         # encode this week's frames (encode_archive handles the flat staging dir)
         out_dir = os.path.join(args.archive_dir, wk)
@@ -153,16 +163,16 @@ def main():
         outputs = [os.path.join(out_dir, f) for f in os.listdir(out_dir)
                    if os.path.isfile(os.path.join(out_dir, f))]
         print(f"[{wk}] publishing archive-{wk} with {len(outputs)} files")
-        subprocess.run(["gh", "release", "create", f"archive-{wk}", *outputs,
-                        "--repo", REPO, "--title", f"8K Archive {wk}",
-                        "--notes", f"Near-lossless 8K video + 2K stills for ISO "
-                                   f"week {wk} ({len(tags)} harvest runs). See "
-                                   f"manifest_{wk}.csv."], check=True)
+        run_gh(["release", "create", f"archive-{wk}", *outputs,
+                "--repo", REPO, "--title", f"8K Archive {wk}",
+                "--notes", f"Near-lossless 8K video + 2K stills for ISO "
+                           f"week {wk} ({len(tags)} harvest runs). See "
+                           f"manifest_{wk}.csv."])
 
         if not args.no_delete:
             for tag in tags:
-                subprocess.run(["gh", "release", "delete", tag, "--repo", REPO,
-                                "--yes", "--cleanup-tag"], check=True)
+                run_gh(["release", "delete", tag, "--repo", REPO,
+                        "--yes", "--cleanup-tag"])
             print(f"[{wk}] deleted {len(tags)} per-run releases")
 
         shutil.rmtree(staging, ignore_errors=True)
