@@ -12,7 +12,7 @@ on:
       cleanup:
         description: "Delete the per-run harvest releases after archiving them"
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: write
