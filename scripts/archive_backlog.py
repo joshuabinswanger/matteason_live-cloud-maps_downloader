@@ -42,10 +42,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ENCODER = os.path.join(HERE, "encode_archive.py")
 
 
-def run_gh(args, retries=5):
+DELETE_FAILURES = []
+
+
+def run_gh(args, retries=6, fatal=True):
     """Run a gh command with retries -- the GitHub API/CLI flakes intermittently
     (transient 401s, rate hiccups) and a single failure shouldn't abort a long
-    batch. Returns stdout on success; raises after exhausting retries."""
+    batch. Returns stdout on success. On exhaustion: raises if fatal, else logs
+    and returns None (used for deletes -- a leftover raw release is harmless and
+    gets cleaned on the next pass)."""
     for attempt in range(1, retries + 1):
         r = subprocess.run(["gh", *args], text=True, capture_output=True)
         if r.returncode == 0:
@@ -53,8 +58,11 @@ def run_gh(args, retries=5):
         sys.stderr.write(f"[gh retry {attempt}/{retries}] {' '.join(args[:3])} "
                          f"rc={r.returncode}: {r.stderr.strip()[:200]}\n")
         sys.stderr.flush()
-        time.sleep(3 * attempt)
-    raise RuntimeError(f"gh failed after {retries} attempts: {' '.join(args)}")
+        time.sleep(min(30, 5 * attempt))
+    if fatal:
+        raise RuntimeError(f"gh failed after {retries} attempts: {' '.join(args)}")
+    sys.stderr.write(f"[gh GAVE UP -- will retry next run] {' '.join(args)}\n")
+    return None
 
 
 def week_of_tag(tag):
@@ -140,8 +148,9 @@ def main():
             print(f"\n[{wk}] already archived -- deleting "
                   f"{len(by_week[wk])} redundant raw releases")
             for tag in by_week[wk]:
-                run_gh(["release", "delete", tag, "--repo", REPO,
-                        "--yes", "--cleanup-tag"])
+                if run_gh(["release", "delete", tag, "--repo", REPO,
+                           "--yes", "--cleanup-tag"], fatal=False) is None:
+                    DELETE_FAILURES.append(tag)
 
     os.makedirs(args.archive_dir, exist_ok=True)
     for wk in todo:
@@ -170,13 +179,21 @@ def main():
                            f"manifest_{wk}.csv."])
 
         if not args.no_delete:
+            failed = 0
             for tag in tags:
-                run_gh(["release", "delete", tag, "--repo", REPO,
-                        "--yes", "--cleanup-tag"])
-            print(f"[{wk}] deleted {len(tags)} per-run releases")
+                if run_gh(["release", "delete", tag, "--repo", REPO,
+                           "--yes", "--cleanup-tag"], fatal=False) is None:
+                    DELETE_FAILURES.append(tag)
+                    failed += 1
+            print(f"[{wk}] deleted {len(tags) - failed}/{len(tags)} per-run releases")
 
         shutil.rmtree(staging, ignore_errors=True)
 
+    if DELETE_FAILURES:
+        print(f"\n{len(DELETE_FAILURES)} raw releases could not be deleted "
+              f"(archived safely; rerun to clean up):")
+        for t in DELETE_FAILURES:
+            print(f"  {t}")
     print("\nDone.")
 
 
