@@ -98,7 +98,7 @@ Consolidates a period's harvest releases into one compact archive. It pulls the
 These are published as a single Release tagged `archive-YYYY-WW`. Pass
 `cleanup: true` to delete the per-run harvest releases once they've been folded
 into the archive. The codec settings are overridable via env vars
-(`X265_CRF`, `X265_PRESET`, `VP9_CRF`).
+(`X265_CRF`, `X265_PRESET`, `ALPHA_COLOR_CRF`, `ALPHA_MASK_CRF`).
 
 **Why a video for the 8K master?** Two reasons: a video codec exploits the
 temporal redundancy between near-identical consecutive frames, and it
@@ -129,6 +129,29 @@ python live-cloud-maps-downloader.py
 ```
 
 Downloaded files will appear in a `downloads/` folder in the working directory. This folder is excluded from git via `.gitignore` — distribution is handled through GitHub Releases.
+
+### Archiving a local `downloads/` folder
+
+`encode_archive.py` accepts the nested per-map `downloads/<map>/` tree directly
+(not just the flat layout CI stages), so you can fold a local collection into
+the same archive format without going through GitHub Releases:
+
+```bash
+# downloads/<map>/*  ->  out/<map>_8K_<label>.mp4 + _2K_<label>.zip + manifest
+python scripts/encode_archive.py downloads archive_out my-label
+```
+
+Reverse it with `extract_archive.py` to get the 8K frames back (original
+filenames restored from the manifest):
+
+```bash
+python scripts/extract_archive.py archive_out restored          # all maps
+python scripts/extract_archive.py archive_out restored --maps earth_night
+python scripts/extract_archive.py archive_out restored --frame 0
+```
+
+(`downloads_2k/` is already 2K, so it doesn't need video archiving — the
+archive's `*_2K_*.zip` files are the equivalent working copies.)
 
 ## License
 

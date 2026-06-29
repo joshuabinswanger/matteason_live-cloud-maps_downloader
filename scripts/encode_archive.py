@@ -14,7 +14,9 @@ visually near-lossless at full 8192x4096.
 Usage:
     python scripts/encode_archive.py <input_dir> <output_dir> <week_label>
 
-<input_dir>   flat folder of downloaded assets, e.g. earth_day_20260311_1200.jpg
+<input_dir>   either a flat folder of assets (e.g. earth_day_20260311_1200.jpg,
+              as CI stages from release assets) OR a nested per-map tree like
+              the local downloads/<map>/ layout -- both are handled.
 <output_dir>  created if missing; receives the videos, zips and manifest
 <week_label>  e.g. 2026-W26, embedded in the output filenames
 """
@@ -38,16 +40,18 @@ FRAMERATE = "12"      # playback fps for the timelapse; arbitrary
 TS_RE = re.compile(r"(\d{8}_\d{4})")  # the YYYYMMDD_HHMM stamp in each filename
 
 
-def map_type_of(filename):
+def map_type_of(path):
+    name = os.path.basename(path)
     for mt in MAP_TYPES:
-        if filename.startswith(mt + "_"):
+        if name.startswith(mt + "_"):
             return mt
     return None
 
 
-def timestamp_of(filename):
-    m = TS_RE.search(filename)
-    return m.group(1) if m else filename
+def timestamp_of(path):
+    name = os.path.basename(path)
+    m = TS_RE.search(name)
+    return m.group(1) if m else name
 
 
 def _hevc(pattern, out_path, crf, vf=None, pix_fmt="yuv444p"):
@@ -65,20 +69,30 @@ def _hevc(pattern, out_path, crf, vf=None, pix_fmt="yuv444p"):
 
 
 def group_frames(input_dir):
-    """Bucket every file in input_dir by map type, sorted chronologically."""
+    """Bucket frames by map type (full paths), sorted chronologically.
+
+    Walks input_dir recursively, so both a flat folder (CI stages release
+    assets into one dir) and a nested per-map tree (the local downloads/<map>/
+    layout) work. Files are grouped by their map-type filename prefix; duplicate
+    basenames across subfolders are ignored after the first seen.
+    """
     groups = {mt: [] for mt in MAP_TYPES}
-    for fn in sorted(os.listdir(input_dir)):
-        if not os.path.isfile(os.path.join(input_dir, fn)):
-            continue
-        mt = map_type_of(fn)
-        if mt:
-            groups[mt].append(fn)
+    seen = set()
+    for root, dirs, files in os.walk(input_dir):
+        dirs.sort()
+        for fn in sorted(files):
+            if fn in seen:
+                continue
+            mt = map_type_of(fn)
+            if mt:
+                seen.add(fn)
+                groups[mt].append(os.path.join(root, fn))
     for mt in groups:
         groups[mt].sort(key=timestamp_of)
     return groups
 
 
-def encode_video(frames, input_dir, map_type, out_dir, base):
+def encode_video(frame_paths, map_type, out_dir, base):
     """Copy frames to a temp sequence and ffmpeg-encode to out_dir.
 
     Most maps -> one near-lossless 4:4:4 HEVC mp4 (`<base>.mp4`). CRF 20, not
@@ -95,11 +109,10 @@ def encode_video(frames, input_dir, map_type, out_dir, base):
 
     Returns the list of output filenames written.
     """
-    ext = os.path.splitext(frames[0])[1].lower()
+    ext = os.path.splitext(frame_paths[0])[1].lower()
     with tempfile.TemporaryDirectory() as seq:
-        for i, fn in enumerate(frames):
-            shutil.copy(os.path.join(input_dir, fn),
-                        os.path.join(seq, f"{i:05d}{ext}"))
+        for i, src in enumerate(frame_paths):
+            shutil.copy(src, os.path.join(seq, f"{i:05d}{ext}"))
         pattern = os.path.join(seq, f"%05d{ext}")
 
         if map_type == "clouds_alpha":
@@ -118,14 +131,15 @@ def encode_video(frames, input_dir, map_type, out_dir, base):
         return [out]
 
 
-def make_2k_zip(frames, input_dir, out_zip):
+def make_2k_zip(frame_paths, out_zip):
     """Downscale each frame to 2K and bundle the set into one zip."""
     with tempfile.TemporaryDirectory() as tmp, \
             zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-        for fn in frames:
+        for src in frame_paths:
+            fn = os.path.basename(src)
             ext = os.path.splitext(fn)[1].lower()
             out_path = os.path.join(tmp, fn)
-            with Image.open(os.path.join(input_dir, fn)) as img:
+            with Image.open(src) as img:
                 resized = img.resize(TWO_K, Image.LANCZOS)
                 if ext in (".jpg", ".jpeg"):
                     resized.convert("RGB").save(
@@ -151,12 +165,11 @@ def main():
             continue
         print(f"[{mt}] {len(frames)} frames")
 
-        encode_video(frames, input_dir, mt, output_dir, f"{mt}_8K_{week}")
-        make_2k_zip(frames, input_dir,
-                    os.path.join(output_dir, f"{mt}_2K_{week}.zip"))
+        encode_video(frames, mt, output_dir, f"{mt}_8K_{week}")
+        make_2k_zip(frames, os.path.join(output_dir, f"{mt}_2K_{week}.zip"))
 
-        for i, fn in enumerate(frames):
-            manifest_rows.append([mt, i, timestamp_of(fn), fn])
+        for i, p in enumerate(frames):
+            manifest_rows.append([mt, i, timestamp_of(p), os.path.basename(p)])
 
     manifest_path = os.path.join(output_dir, f"manifest_{week}.csv")
     with open(manifest_path, "w", newline="") as f:
