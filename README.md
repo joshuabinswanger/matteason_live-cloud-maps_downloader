@@ -51,7 +51,75 @@ The per-map subfolder structure makes these downloads ideal for use as **image s
 
 ## Automation
 
-A GitHub Actions workflow ([daily-harvest.yml](.github/workflows/daily-harvest.yml)) runs every 3 hours via cron and also supports manual triggering. After each download it creates a new **GitHub Release** tagged `maps-YYYYMMDD_HHMM` containing all five map files as release assets.
+Two GitHub Actions workflows run the pipeline. Both are **triggered externally**
+(e.g. from a Synology / Windows scheduled task) rather than by GitHub's built-in
+`schedule:` cron, which is unreliable — it frequently runs late or silently skips
+runs under load. Your own scheduler fires each workflow on its own clock:
+
+```
+your scheduler ─ every 6 h ─► dispatch  daily-harvest   ─► download 8K → per-run Release
+               └ weekly    ─► dispatch  weekly-archive  ─► encode the week into one tiny archive
+```
+
+Dispatch with the GitHub CLI:
+
+```bash
+gh workflow run daily-harvest.yml  --repo joshuabinswanger/matteason_live-cloud-maps_downloader --ref main
+gh workflow run weekly-archive.yml --repo joshuabinswanger/matteason_live-cloud-maps_downloader --ref main
+```
+
+…or with `curl` and a fine-grained PAT (no `gh` install needed on the NAS):
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+  https://api.github.com/repos/joshuabinswanger/matteason_live-cloud-maps_downloader/actions/workflows/weekly-archive.yml/dispatches \
+  -d '{"ref":"main"}'
+```
+
+### Harvest — [daily-harvest.yml](.github/workflows/daily-harvest.yml)
+
+Downloads the five 8K maps and publishes them as a **GitHub Release** tagged
+`maps-YYYYMMDD_HHMM`, with all files as release assets. Run this on whatever
+cadence you want frames at (every 6 h ≈ 28 frames/week).
+
+### Weekly archive — [weekly-archive.yml](.github/workflows/weekly-archive.yml)
+
+Consolidates a period's harvest releases into one compact archive. It pulls the
+`maps-*` releases from the last `days` (default 7), then runs
+[scripts/encode_archive.py](scripts/encode_archive.py) to produce, **per map type**:
+
+| Output | Format | Purpose |
+| ------ | ------ | ------- |
+| `<map>_8K_<week>.mp4` | HEVC, `yuv444p`, CRF 20 (visually near-lossless) | Full-res 8K master archive |
+| `clouds_alpha_8K_<week>_color.mp4` + `_mask.mp4` | Two grayscale HEVC streams (CRF 20 / CRF 14) | 8K cloud-colour layer + alpha mask, recombined on extraction |
+| `<map>_2K_<week>.zip` | 2048×1024 JPEG q90 / PNG | Lightweight working textures |
+| `manifest_<week>.csv` | CSV | Maps every video frame index → original timestamp |
+
+These are published as a single Release tagged `archive-YYYY-WW`. Pass
+`cleanup: true` to delete the per-run harvest releases once they've been folded
+into the archive. The codec settings are overridable via env vars
+(`X265_CRF`, `X265_PRESET`, `VP9_CRF`).
+
+**Why a video for the 8K master?** Two reasons: a video codec exploits the
+temporal redundancy between near-identical consecutive frames, and it
+consolidates a week of files into one. The size win depends heavily on the map —
+on real harvested data, the busy full-colour maps land around **2×** smaller at
+CRF 20, while simpler maps (night lights, cloud mask) go further. The bigger
+practical benefit is having one tidy file per map plus the small 2K working
+copies, instead of dozens of loose 8K stills. Extract any frame back out with
+ffmpeg:
+
+```bash
+ffmpeg -i earth_day_8K_2026-W26.mp4 -vf "select=eq(n\,FRAME)" -vframes 1 earth_day.png
+```
+
+For `clouds_alpha`, recombine the colour and mask streams back into an RGBA PNG:
+
+```bash
+ffmpeg -i clouds_alpha_8K_2026-W26_color.mp4 -i clouds_alpha_8K_2026-W26_mask.mp4 \
+  -filter_complex "[0:v]select=eq(n\,FRAME),format=gbrp[c];[1:v]select=eq(n\,FRAME)[m];[c][m]alphamerge,format=rgba" \
+  -frames:v 1 clouds_alpha.png
+```
 
 ## Running Locally
 

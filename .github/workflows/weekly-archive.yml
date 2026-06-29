@@ -1,0 +1,85 @@
+name: Weekly 8K Archive
+
+# Dispatched externally (e.g. from your NAS / Windows scheduler) on a weekly
+# clock -- GitHub's built-in cron is unreliable, so we trigger via the API:
+#   gh workflow run weekly-archive.yml --repo <owner>/<repo> --ref main
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "How many days back to pull harvest releases from"
+        default: "7"
+      cleanup:
+        description: "Delete the per-run harvest releases after archiving them"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    env:
+      REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      X265_PRESET: medium  # 'slow' is sharper but very slow at 8K on a 4-core runner
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Pillow
+        run: pip install Pillow
+
+      - name: Compute week label and cutoff
+        id: meta
+        run: |
+          WEEK="$(date -u +'%G-W%V')"
+          CUTOFF="$(date -u -d "${{ inputs.days }} days ago" +'%Y-%m-%dT%H:%M:%SZ')"
+          echo "week=$WEEK" >> "$GITHUB_OUTPUT"
+          echo "cutoff=$CUTOFF" >> "$GITHUB_OUTPUT"
+          echo "Week $WEEK -- archiving 'maps-*' releases created since $CUTOFF"
+
+      - name: Download the period's harvest releases
+        id: dl
+        run: |
+          mkdir -p staging
+          gh release list --repo "$REPO" --limit 1000 \
+            --json tagName,createdAt \
+            --jq ".[] | select(.createdAt >= \"${{ steps.meta.outputs.cutoff }}\") | select(.tagName | startswith(\"maps-\")) | .tagName" > tags.txt
+          COUNT=$(grep -c . tags.txt || true)
+          echo "Found $COUNT harvest releases in window"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          while read -r tag; do
+            [ -z "$tag" ] && continue
+            echo "Downloading $tag"
+            gh release download "$tag" --repo "$REPO" --dir staging --pattern '*'
+          done < tags.txt
+
+      - name: Encode archive (8K video + 2K stills + manifest)
+        if: steps.dl.outputs.count != '0'
+        run: python scripts/encode_archive.py staging archive "${{ steps.meta.outputs.week }}"
+
+      - name: Publish archive release
+        if: steps.dl.outputs.count != '0'
+        run: |
+          TAG="archive-${{ steps.meta.outputs.week }}"
+          gh release create "$TAG" archive/* \
+            --repo "$REPO" \
+            --title "8K Archive ${{ steps.meta.outputs.week }}" \
+            --notes "Near-lossless 8K video + 2K still-frame zips for week ${{ steps.meta.outputs.week }}. See manifest_${{ steps.meta.outputs.week }}.csv for the frame-to-timestamp mapping." \
+          || gh release upload "$TAG" archive/* --repo "$REPO" --clobber
+
+      - name: Clean up archived harvest releases
+        if: ${{ steps.dl.outputs.count != '0' && inputs.cleanup == true }}
+        run: |
+          while read -r tag; do
+            [ -z "$tag" ] && continue
+            echo "Deleting $tag"
+            gh release delete "$tag" --repo "$REPO" --yes --cleanup-tag
+          done < tags.txt
