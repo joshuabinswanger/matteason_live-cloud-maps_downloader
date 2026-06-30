@@ -55,6 +55,11 @@ def run_gh(args, retries=6, fatal=True):
         r = subprocess.run(["gh", *args], text=True, capture_output=True)
         if r.returncode == 0:
             return r.stdout
+        # An empty release (failed harvest that published no assets) is benign:
+        # there's nothing to download, so skip it rather than retry/abort.
+        if "no assets to download" in (r.stderr or "").lower():
+            sys.stderr.write(f"[gh] {' '.join(args[:3])}: empty release, skipping\n")
+            return ""
         sys.stderr.write(f"[gh retry {attempt}/{retries}] {' '.join(args[:3])} "
                          f"rc={r.returncode}: {r.stderr.strip()[:200]}\n")
         sys.stderr.flush()
