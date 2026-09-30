@@ -51,28 +51,26 @@ The per-map subfolder structure makes these downloads ideal for use as **image s
 
 ## Automation
 
-Two GitHub Actions workflows run the pipeline. Both are **triggered externally**
-(e.g. from a Synology / Windows scheduled task) rather than by GitHub's built-in
-`schedule:` cron, which is unreliable — it frequently runs late or silently skips
-runs under load. Your own scheduler fires each workflow on its own clock:
+The pipeline has two stages, both **triggered externally** (from a Synology /
+Windows scheduled task) rather than by GitHub's built-in `schedule:` cron, which
+is unreliable — it frequently runs late or silently skips runs under load:
 
 ```
-your scheduler ─ every 6 h ─► dispatch  daily-harvest   ─► download 8K → per-run Release
-               └ weekly    ─► dispatch  weekly-archive  ─► encode the week into one tiny archive
+scheduler ─ every 3 h ─► dispatch daily-harvest.yml     ─► download 8K → per-run Release
+          └ weekly    ─► run scripts/archive_backlog.py ─► fold each finished week into one archive
 ```
 
-Dispatch with the GitHub CLI:
+Dispatch the harvest with the GitHub CLI:
 
 ```bash
-gh workflow run daily-harvest.yml  --repo joshuabinswanger/matteason_live-cloud-maps_downloader --ref main
-gh workflow run weekly-archive.yml --repo joshuabinswanger/matteason_live-cloud-maps_downloader --ref main
+gh workflow run daily-harvest.yml --repo joshuabinswanger/matteason_live-cloud-maps_downloader --ref main
 ```
 
 …or with `curl` and a fine-grained PAT (no `gh` install needed on the NAS):
 
 ```bash
 curl -X POST -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
-  https://api.github.com/repos/joshuabinswanger/matteason_live-cloud-maps_downloader/actions/workflows/weekly-archive.yml/dispatches \
+  https://api.github.com/repos/joshuabinswanger/matteason_live-cloud-maps_downloader/actions/workflows/daily-harvest.yml/dispatches \
   -d '{"ref":"main"}'
 ```
 
@@ -80,13 +78,31 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.githu
 
 Downloads the five 8K maps and publishes them as a **GitHub Release** tagged
 `maps-YYYYMMDD_HHMM`, with all files as release assets. Run this on whatever
-cadence you want frames at (every 6 h ≈ 28 frames/week).
+cadence you want frames at (every 3 h ≈ 56 frames/week).
 
-### Weekly archive — [weekly-archive.yml](.github/workflows/weekly-archive.yml)
+### Weekly archive — [scripts/archive_backlog.py](scripts/archive_backlog.py)
 
-Consolidates a period's harvest releases into one compact archive. It pulls the
-`maps-*` releases from the last `days` (default 7), then runs
-[scripts/encode_archive.py](scripts/encode_archive.py) to produce, **per map type**:
+Runs locally (needs `gh`, `ffmpeg` and Pillow) from a weekly Windows scheduled
+task via [scripts/weekly_archive_task.ps1](scripts/weekly_archive_task.ps1),
+which logs each run to `_backlog_staging/logs/`. For every **finished** ISO week
+still held as `maps-*` releases it downloads them, encodes the archive, publishes
+it as `archive-YYYY-Www`, and only then deletes the per-run releases. Weeks are
+labelled by capture timestamp, so a late or missed run just catches up on the
+next one; an archive release is trusted only once it holds every output file,
+and an incomplete one is rebuilt before any raw release is deleted.
+
+```bash
+python scripts/archive_backlog.py --dry-run     # show what would be archived
+python scripts/archive_backlog.py               # archive + delete raw releases
+```
+
+[weekly-archive.yml](.github/workflows/weekly-archive.yml) does the same encoding
+on a GitHub runner and can be dispatched by hand, but it labels the archive with
+the week it *runs* in and sweeps the last `days` (default 7) by release date, so
+it only lines up with real weeks when dispatched just before the week rolls over.
+
+Either way the archive is built by
+[scripts/encode_archive.py](scripts/encode_archive.py), producing **per map type**:
 
 | Output | Format | Purpose |
 | ------ | ------ | ------- |
@@ -95,9 +111,9 @@ Consolidates a period's harvest releases into one compact archive. It pulls the
 | `<map>_2K_<week>.zip` | 2048×1024 JPEG q90 / PNG | Lightweight working textures |
 | `manifest_<week>.csv` | CSV | Maps every video frame index → original timestamp |
 
-These are published as a single Release tagged `archive-YYYY-WW`. Pass
-`cleanup: true` to delete the per-run harvest releases once they've been folded
-into the archive. The codec settings are overridable via env vars
+These are published as a single Release tagged `archive-YYYY-Www`
+(`archive_backlog.py` also keeps a local copy under its `--archive-dir`, one
+folder per week). The codec settings are overridable via env vars
 (`X265_CRF`, `X265_PRESET`, `ALPHA_COLOR_CRF`, `ALPHA_MASK_CRF`).
 
 **Why a video for the 8K master?** Two reasons: a video codec exploits the

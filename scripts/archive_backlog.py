@@ -60,6 +60,11 @@ def run_gh(args, retries=6, fatal=True):
         if "no assets to download" in (r.stderr or "").lower():
             sys.stderr.write(f"[gh] {' '.join(args[:3])}: empty release, skipping\n")
             return ""
+        # A delete whose target is already gone succeeded -- typically a draft
+        # release, which has no git tag for --cleanup-tag to remove.
+        if args[:2] == ["release", "delete"] and attempt > 1 \
+                and "release not found" in (r.stderr or "").lower():
+            return ""
         sys.stderr.write(f"[gh retry {attempt}/{retries}] {' '.join(args[:3])} "
                          f"rc={r.returncode}: {r.stderr.strip()[:200]}\n")
         sys.stderr.flush()
@@ -87,6 +92,61 @@ def list_releases():
     out = run_gh(["release", "list", "--repo", REPO, "--limit", "5000",
                   "--json", "tagName,isDraft"])
     return json.loads(out)
+
+
+def release_assets(tag):
+    """{asset name: size} of fully uploaded assets, or None if the release
+    can't be read (missing, or a transient API error)."""
+    r = subprocess.run(["gh", "release", "view", tag, "--repo", REPO,
+                        "--json", "assets"], text=True, capture_output=True)
+    if r.returncode != 0:
+        return None
+    return {a["name"]: a["size"] for a in json.loads(r.stdout)["assets"]
+            if a["state"] == "uploaded"}
+
+
+def missing_outputs(have, outputs):
+    return [p for p in outputs
+            if have.get(os.path.basename(p)) != os.path.getsize(p)]
+
+
+def archive_complete(wk, archive_dir):
+    """True only if archive-<wk> holds its manifest and every file of the local
+    copy (when there is one) -- the gate before raw releases may be deleted."""
+    have = release_assets(f"archive-{wk}")
+    if not have or f"manifest_{wk}.csv" not in have:
+        return False
+    local = os.path.join(archive_dir, wk)
+    if os.path.isdir(local):
+        files = [os.path.join(local, f) for f in os.listdir(local)
+                 if os.path.isfile(os.path.join(local, f))]
+        return not missing_outputs(have, files)
+    return True
+
+
+def publish_archive(wk, outputs, notes, attempts=6):
+    """Create archive-<wk> and make sure every output is on it. GitHub can
+    return a 5xx on `release create` after the release was in fact created
+    (sometimes with only part of the assets), so success is judged by what the
+    release actually holds, and missing assets are uploaded into it."""
+    tag = f"archive-{wk}"
+    for attempt in range(1, attempts + 1):
+        have = release_assets(tag)
+        if have is None:
+            run_gh(["release", "create", tag, *outputs, "--repo", REPO,
+                    "--title", f"8K Archive {wk}", "--notes", notes],
+                   retries=1, fatal=False)
+        else:
+            missing = missing_outputs(have, outputs)
+            if not missing:
+                return
+            print(f"[{wk}] {tag} is missing {len(missing)} asset(s), uploading")
+            run_gh(["release", "upload", tag, *missing, "--repo", REPO,
+                    "--clobber"], retries=1, fatal=False)
+        time.sleep(min(30, 5 * attempt))
+    have = release_assets(tag)
+    if have is None or missing_outputs(have, outputs):
+        raise RuntimeError(f"{tag} still incomplete after {attempts} attempts")
 
 
 def main():
@@ -126,9 +186,13 @@ def main():
     for wk in weeks:
         if wk == cur_week and not args.include_current:
             print(f"[skip] {wk}: {len(by_week[wk])} runs -- current week")
-        elif wk in archived:
-            # archive exists; the raw per-run releases are now redundant
+        elif wk in archived and archive_complete(wk, args.archive_dir):
+            # archive exists and is whole; the raw per-run releases are redundant
             cleanup_only.append(wk)
+        elif wk in archived:
+            print(f"[redo] {wk}: archive-{wk} exists but is incomplete -- "
+                  f"rebuilding it, raw releases kept until it is whole")
+            todo.append(wk)
         else:
             todo.append(wk)
 
@@ -177,11 +241,9 @@ def main():
         outputs = [os.path.join(out_dir, f) for f in os.listdir(out_dir)
                    if os.path.isfile(os.path.join(out_dir, f))]
         print(f"[{wk}] publishing archive-{wk} with {len(outputs)} files")
-        run_gh(["release", "create", f"archive-{wk}", *outputs,
-                "--repo", REPO, "--title", f"8K Archive {wk}",
-                "--notes", f"Near-lossless 8K video + 2K stills for ISO "
-                           f"week {wk} ({len(tags)} harvest runs). See "
-                           f"manifest_{wk}.csv."])
+        publish_archive(wk, outputs,
+                        f"Near-lossless 8K video + 2K stills for ISO week {wk} "
+                        f"({len(tags)} harvest runs). See manifest_{wk}.csv.")
 
         if not args.no_delete:
             failed = 0
