@@ -10,7 +10,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Compute rounded timestamp
         id: timestamp
@@ -22,7 +22,7 @@ jobs:
           echo "ROUNDED_TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -32,9 +32,13 @@ jobs:
       - name: Run 8K Downloader
         run: python live-cloud-maps-downloader.py
 
+      # Asset uploads to GitHub occasionally drop mid-transfer ("other side
+      # closed", 5xx) and leave a draft holding only some of the maps. So the
+      # release is judged by what it actually holds: missing or short assets are
+      # re-uploaded until every file is there, and only then is it published.
       - name: Publish Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: maps-${{ steps.timestamp.outputs.value }}
-          name: EarthCloudMaps_${{ steps.timestamp.outputs.value }}
-          files: downloads/**/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: maps-${{ steps.timestamp.outputs.value }}
+          TITLE: EarthCloudMaps_${{ steps.timestamp.outputs.value }}
+        run: bash scripts/publish_release.sh
